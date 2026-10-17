@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+.env
+.env.bak
+*.pyc
+Brief_Agency.pdf
+runcheck_brief.pdf
