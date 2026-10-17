@@ -157,6 +157,117 @@ def order_questions(issues: list[Issue], max_q: int = 5) -> list[Issue]:
     return issues[:max_q]
 
 
+def detect_conflicts_llm(chunks: list[Chunk], state: dict[str, ProductField]) -> list[Issue]:
+    """LLM-powered conflict detection — finds semantic issues regex misses.
+
+    Only runs when an LLM key is configured. Returns additional issues
+    to merge with deterministic results. Falls back to empty list when
+    no LLM backend is available.
+    """
+    import json
+    from .llm import _llm_config, _llm_extract
+
+    if _llm_config() is None:
+        return []
+
+    found = {}
+    missing = []
+    for k, pf in state.items():
+        if pf.value:
+            found[k] = {
+                "value": pf.value,
+                "status": pf.status,
+                "confidence": pf.confidence,
+            }
+        elif pf.status == "missing":
+            missing.append(k)
+
+    sources_text = "\n\n".join(
+        f"[{c.file} {c.loc}] {c.text[:600]}" for c in chunks[:8]
+    )
+
+    prompt = (
+        "You are a packaging brief QA reviewer. Review extracted fields and source chunks.\n"
+        "Find additional issues beyond obvious regex mismatches: semantic contradictions,\n"
+        "claims vs ingredient conflicts, vague/TBC values, missing mandatory fields for region,\n"
+        "unclear logo rules, serving size without units.\n\n"
+        f"EXTRACTED FIELDS:\n{json.dumps(found, indent=2)}\n\n"
+        f"MISSING FIELDS:\n{json.dumps(missing, indent=2)}\n\n"
+        f"SOURCES:\n{sources_text}\n\n"
+        'Return JSON only: {"issues": [{"field": "<key>", "kind": "conflict|missing|review", '
+        '"message": "<human readable>", "evidence": ["<verbatim quote>"], "priority": 0|1|2}]}\n'
+        "Be conservative. Priority: 0=blocker, 1=review, 2=minor."
+    )
+
+    try:
+        data = _llm_extract(prompt)
+        issues = []
+        for item in data.get("issues", []):
+            issues.append(
+                Issue(
+                    kind=str(item.get("kind", "review")),
+                    field=str(item.get("field", "general")),
+                    message=str(item.get("message", "")),
+                    evidence=list(item.get("evidence", []))[:3],
+                    priority=int(item.get("priority", 1)),
+                )
+            )
+        return issues
+    except Exception:
+        return []
+
+
+def order_questions_llm(
+    issues: list[Issue], chunks: list[Chunk], max_q: int = 5
+) -> list[Issue]:
+    """LLM-powered question prioritization and rephrasing.
+
+    Uses the LLM to turn issues into natural, conversational follow-up
+    questions for the brand manager. Falls back to deterministic ordering
+    when no LLM key is configured.
+    """
+    import json
+    from .llm import _llm_config, _llm_extract
+
+    if _llm_config() is None or not issues:
+        return issues[:max_q]
+
+    issues_summary = "\n".join(
+        f"- {i.field}: {i.message} (priority {i.priority}, kind {i.kind})"
+        for i in issues
+    )
+
+    prompt = (
+        "You are a packaging brief assistant. Prioritize and rephrase the following issues\n"
+        "into clear, conversational follow-up questions for a brand manager. Keep max 5.\n"
+        "Return JSON only: {\"questions\": [{\"field\": \"<key>\", \"question\": \"<natural question>\", \"priority\": 0|1|2}]}\n\n"
+        f"ISSUES:\n{issues_summary}\n\n"
+        "Prioritize: allergens, net quantity, pack size, mandatory content first (blockers).\n"
+        "Make questions specific and actionable. Reference the field being asked about."
+    )
+
+    try:
+        data = _llm_extract(prompt)
+        ordered: list[Issue] = []
+        seen: set[str] = set()
+        for item in data.get("questions", []):
+            f = str(item.get("field", ""))
+            q = str(item.get("question", ""))
+            if f in seen or not q:
+                continue
+            seen.add(f)
+            for i in issues:
+                if i.field == f:
+                    i.message = q
+                    ordered.append(i)
+                    break
+            if len(ordered) >= max_q:
+                break
+        return ordered or issues[:max_q]
+    except Exception:
+        return issues[:max_q]
+
+
 def apply_answer(state: dict[str, ProductField], field_key: str, answer: str) -> None:
     pf = state.get(field_key)
     if not pf:

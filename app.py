@@ -9,7 +9,7 @@ from core.ingest import ingest, Chunk
 from core.schema import completeness, FIELD_LABELS, region_hint
 from core.llm import extract_with_llm
 import core.llm as _llm_mod  # for last_error (read AFTER extract returns)
-from core.gaps import detect_conflicts, order_questions, apply_answer
+from core.gaps import detect_conflicts, order_questions, order_questions_llm, detect_conflicts_llm, apply_answer
 from core.brief import render_markdown, export_pdf
 
 BUNDLES = {
@@ -55,9 +55,26 @@ with st.sidebar:
             with st.spinner("Extracting + checking gaps…"):
                 state, backend = extract_with_llm(st.session_state.chunks)
                 issues = detect_conflicts(st.session_state.chunks, state)
+
+                # LLM-powered additional conflict detection when live backend available
+                if backend != "offline-rules":
+                    with st.spinner("Running AI-powered conflict review…"):
+                        llm_issues = detect_conflicts_llm(st.session_state.chunks, state)
+                        existing = {(i.field, i.message) for i in issues}
+                        for li in llm_issues:
+                            key = (li.field, li.message)
+                            if key not in existing:
+                                issues.append(li)
+                                existing.add(key)
+
                 st.session_state.state = state
                 st.session_state.issues = issues
-                st.session_state.queue = order_questions(issues)
+                if backend != "offline-rules":
+                    st.session_state.queue = order_questions_llm(
+                        issues, st.session_state.chunks
+                    )
+                else:
+                    st.session_state.queue = order_questions(issues)
                 st.session_state.qi = 0
                 st.session_state.backend = backend
                 st.session_state.chat = []
