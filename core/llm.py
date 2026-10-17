@@ -21,6 +21,7 @@ import re
 import json
 from .schema import empty_state, ProductField, Source
 from .ingest import Chunk
+from .agents import agentic_extract, run_agentic_pipeline
 
 
 def _combined(chunks: list[Chunk]) -> str:
@@ -234,7 +235,15 @@ def _sanitize_error(e: Exception) -> str:
 
 
 def extract_with_llm(chunks: list[Chunk]) -> tuple[dict[str, ProductField], str]:
-    """Any OpenAI-compatible LLM backend. Falls back to offline rules on failure."""
+    """Any OpenAI-compatible LLM backend with agentic multi-agent pipeline.
+
+    When an LLM key is configured, runs the advanced agentic pipeline:
+    Classifier → Extractor → Verifier → Conflict Resolver → Router,
+    with a reflexive self-correction loop (HEAR pattern).
+
+    Falls back to deterministic offline rules when no key is configured
+    or when the LLM call fails.
+    """
     global last_error
     last_error = ""
     prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prompts", "extract.txt")
@@ -246,13 +255,17 @@ def extract_with_llm(chunks: list[Chunk]) -> tuple[dict[str, ProductField], str]
 
     if _llm_config() is not None:
         try:
-            data = _llm_extract(template.replace("{{SOURCES}}", combined[:12000]))
+            # Advanced AI-native path: multi-agent pipeline with LLM
+            result = run_agentic_pipeline(chunks)
             _, _, model, _ = _llm_config()  # type: ignore[misc]
-            return _from_llm_json(data, chunks), f"llm-{model.split('/')[-1]}"
+            backend = f"agentic-llm-{model.split('/')[-1]}"
+            return result["extracted"], backend
         except Exception as e:
             # Never leak key material: scrub anything resembling a secret.
             last_error = re.sub(r"(sk-|gsk_|nvapi-|AIza)[A-Za-z0-9_.-]+",
                                 r"\1…", _sanitize_error(e))
+
+    # Deterministic fallback (unchanged behavior)
     return offline_extract(chunks), "offline-rules"
 
 
