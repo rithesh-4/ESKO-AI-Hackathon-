@@ -195,9 +195,7 @@ def _llm_extract(prompt: str) -> dict:
     body = json.dumps({
         "model": model,
         "temperature": 0.1,
-        "response_format": {"type": "json_object"},
         "messages": [{"role": "user", "content": prompt[:12000]}],
-        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
     }).encode("utf-8")
     req = urllib.request.Request(
         f"{base}/chat/completions",
